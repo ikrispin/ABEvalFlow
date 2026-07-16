@@ -6,8 +6,6 @@ spec:
   timeouts:
     pipeline: "4h"
     tasks: "3h"
-  taskRunTemplate:
-    serviceAccountName: abevalflow-integration
   pipelineSpec:
     params:
       - name: SNAPSHOT
