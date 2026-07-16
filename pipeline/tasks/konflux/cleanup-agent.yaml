@@ -1,0 +1,41 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: cleanup-agent
+  labels:
+    app.kubernetes.io/name: abevalflow
+    app.kubernetes.io/component: konflux
+spec:
+  description: >-
+    Cleans up the A2A agent Deployment and Service created by the deploy-agent
+    task. Runs in the pipeline's finally block to ensure cleanup even on failure.
+  params:
+    - name: agent-name
+      type: string
+      default: ""
+      description: Name of the Deployment/Service to delete
+    - name: deployed
+      type: string
+      default: "false"
+      description: Whether an agent was actually deployed
+  steps:
+    - name: cleanup
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      script: |
+        #!/usr/bin/env bash
+
+        AGENT_NAME="$(params.agent-name)"
+        DEPLOYED="$(params.deployed)"
+
+        if [ -z "$AGENT_NAME" ] || [ "$DEPLOYED" != "true" ]; then
+          echo "No agent to clean up (deployed=$DEPLOYED, name=$AGENT_NAME)"
+          exit 0
+        fi
+
+        echo "=== CLEANUP AGENT ==="
+        echo "Deleting: $AGENT_NAME"
+
+        oc delete deployment/$AGENT_NAME --ignore-not-found=true
+        oc delete service/$AGENT_NAME --ignore-not-found=true
+
+        echo "Cleanup complete"

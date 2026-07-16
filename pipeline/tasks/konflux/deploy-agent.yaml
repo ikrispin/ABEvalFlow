@@ -1,0 +1,151 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: deploy-agent
+  labels:
+    app.kubernetes.io/name: abevalflow
+    app.kubernetes.io/component: konflux
+spec:
+  description: >-
+    Deploys an A2A agent as a Deployment + Service in the current namespace
+    using the container image from the Konflux snapshot. Waits for the agent
+    to become ready and outputs its endpoint URL.
+  params:
+    - name: agent-image
+      type: string
+      description: Full container image reference (with digest) for the agent
+    - name: llm-api-base
+      type: string
+      default: "http://litellm.ab-eval-flow.svc:4000"
+      description: LiteLLM proxy base URL for the agent's LLM calls
+    - name: llm-model
+      type: string
+      default: "gpt-4o"
+      description: LLM model name for the agent
+    - name: pipeline-run-id
+      type: string
+      default: ""
+      description: PipelineRun name for generating unique resource names
+    - name: readiness-timeout
+      type: string
+      default: "300"
+      description: Seconds to wait for agent readiness
+  results:
+    - name: agent-endpoint
+      description: HTTP endpoint URL of the deployed agent
+    - name: agent-name
+      description: Name of the Deployment/Service (for cleanup)
+    - name: deployed
+      description: Whether an agent was deployed (true/false)
+  steps:
+    - name: deploy
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        echo "=== DEPLOY AGENT ==="
+
+        RUN_ID=$(echo "$(params.pipeline-run-id)" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | cut -c1-20)
+        AGENT_NAME="a2a-eval-${RUN_ID:-$(date +%s)}"
+        NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+        AGENT_IMAGE="$(params.agent-image)"
+
+        echo "Agent name: $AGENT_NAME"
+        echo "Namespace: $NAMESPACE"
+        echo "Image: $AGENT_IMAGE"
+
+        cat <<YAML | oc apply -f -
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: $AGENT_NAME
+          namespace: $NAMESPACE
+          labels:
+            app: $AGENT_NAME
+            abevalflow/temp: "true"
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: $AGENT_NAME
+          template:
+            metadata:
+              labels:
+                app: $AGENT_NAME
+            spec:
+              containers:
+              - name: redis
+                image: redis:7-alpine
+                ports:
+                - containerPort: 6379
+                resources:
+                  limits:
+                    cpu: 100m
+                    memory: 128Mi
+              - name: agent
+                image: $AGENT_IMAGE
+                ports:
+                - containerPort: 8000
+                env:
+                - name: LLM_PROVIDER
+                  value: "litellm"
+                - name: LLM_MODEL
+                  value: "openai/$(params.llm-model)"
+                - name: LLM_API_BASE
+                  value: "$(params.llm-api-base)"
+                - name: OPENAI_API_KEY
+                  value: "sk-dummy"
+                - name: RATE_LIMIT_REDIS_URL
+                  value: "redis://localhost:6379/0"
+                - name: SKIP_JWT_VALIDATION
+                  value: "true"
+                - name: SKIP_ORDER_VALIDATION
+                  value: "true"
+                - name: LOG_LEVEL
+                  value: "INFO"
+                resources:
+                  limits:
+                    cpu: 500m
+                    memory: 512Mi
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: $AGENT_NAME
+          namespace: $NAMESPACE
+          labels:
+            abevalflow/temp: "true"
+        spec:
+          selector:
+            app: $AGENT_NAME
+          ports:
+          - port: 8000
+            targetPort: 8000
+        YAML
+
+        TIMEOUT=$(params.readiness-timeout)
+        ENDPOINT="http://${AGENT_NAME}.${NAMESPACE}.svc:8000"
+
+        printf "Waiting for agent readiness"
+        for i in $(seq 1 $((TIMEOUT / 5))); do
+          if oc rollout status deployment/$AGENT_NAME --timeout=5s >/dev/null 2>&1; then
+            if curl -sf "$ENDPOINT/.well-known/agent.json" > /dev/null 2>&1; then
+              echo " ready!"
+              echo -n "$ENDPOINT" > "$(results.agent-endpoint.path)"
+              echo -n "$AGENT_NAME" > "$(results.agent-name.path)"
+              echo -n "true" > "$(results.deployed.path)"
+              echo "Agent endpoint: $ENDPOINT"
+              exit 0
+            fi
+          fi
+          printf "."
+          sleep 5
+        done
+
+        echo " TIMED OUT"
+        echo "Cleaning up failed deployment..."
+        oc delete deployment/$AGENT_NAME service/$AGENT_NAME --ignore-not-found=true
+        echo -n "" > "$(results.agent-endpoint.path)"
+        echo -n "$AGENT_NAME" > "$(results.agent-name.path)"
+        echo -n "false" > "$(results.deployed.path)"
+        exit 1
