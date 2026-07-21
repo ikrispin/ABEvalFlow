@@ -28,7 +28,7 @@ spec:
             - name: name
               value: parse-snapshot
             - name: bundle
-              value: quay.io/rh-ee-ikrispin/abevalflow-catalog/task-parse-snapshot:0.1
+              value: quay.io/rh-ee-ikrispin/abevalflow-task-parse-snapshot:0.1
             - name: kind
               value: task
         params:
@@ -46,7 +46,7 @@ spec:
             - name: name
               value: deploy-agent
             - name: bundle
-              value: quay.io/rh-ee-ikrispin/abevalflow-catalog/task-deploy-agent:0.1
+              value: quay.io/rh-ee-ikrispin/abevalflow-task-deploy-agent:0.1
             - name: kind
               value: task
         params:
@@ -70,7 +70,7 @@ spec:
             - name: name
               value: prepare
             - name: bundle
-              value: quay.io/rh-ee-ikrispin/abevalflow-catalog/task-prepare:0.1
+              value: quay.io/rh-ee-ikrispin/abevalflow-task-prepare:0.1
             - name: kind
               value: task
         params:
@@ -105,7 +105,7 @@ spec:
             - name: name
               value: test
             - name: bundle
-              value: quay.io/rh-ee-ikrispin/abevalflow-catalog/task-test:0.1
+              value: quay.io/rh-ee-ikrispin/abevalflow-task-test:0.1
             - name: kind
               value: task
         params:
@@ -149,7 +149,7 @@ spec:
             - name: name
               value: evaluate
             - name: bundle
-              value: quay.io/rh-ee-ikrispin/abevalflow-catalog/task-evaluate:0.1
+              value: quay.io/rh-ee-ikrispin/abevalflow-task-evaluate:0.1
             - name: kind
               value: task
         params:
@@ -190,7 +190,7 @@ spec:
             - name: name
               value: analyze-scorecard
             - name: bundle
-              value: quay.io/rh-ee-ikrispin/abevalflow-catalog/task-analyze-scorecard:0.1
+              value: quay.io/rh-ee-ikrispin/abevalflow-task-analyze-scorecard:0.1
             - name: kind
               value: task
         params:
@@ -227,7 +227,7 @@ spec:
             - name: name
               value: store
             - name: bundle
-              value: quay.io/rh-ee-ikrispin/abevalflow-catalog/task-store:0.1
+              value: quay.io/rh-ee-ikrispin/abevalflow-task-store:0.1
             - name: kind
               value: task
         params:
@@ -262,7 +262,7 @@ spec:
             - name: name
               value: emit-result
             - name: bundle
-              value: quay.io/rh-ee-ikrispin/abevalflow-catalog/task-emit-result:0.1
+              value: quay.io/rh-ee-ikrispin/abevalflow-task-emit-result:0.1
             - name: kind
               value: task
         params:
@@ -283,7 +283,7 @@ spec:
             - name: name
               value: cleanup-agent
             - name: bundle
-              value: quay.io/rh-ee-ikrispin/abevalflow-catalog/task-cleanup-agent:0.1
+              value: quay.io/rh-ee-ikrispin/abevalflow-task-cleanup-agent:0.1
             - name: kind
               value: task
         params:

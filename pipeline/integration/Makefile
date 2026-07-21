@@ -1,4 +1,4 @@
-QUAY_REPO ?= quay.io/rh-ee-ikrispin/abevalflow-catalog
+QUAY_NS ?= quay.io/rh-ee-ikrispin
 VERSION ?= 0.1
 TASKS_DIR := ../tasks/konflux
 
@@ -12,21 +12,21 @@ help: ## Show this help
 bundles: $(addprefix bundle-,$(TASKS)) ## Build and push all Tekton Bundles
 
 bundle-%: ## Push a single task bundle (e.g. make bundle-parse-snapshot)
-	@echo "=== Pushing task-$* ==="
-	tkn bundle push $(QUAY_REPO)/task-$*:$(VERSION) \
+	@echo "=== Pushing abevalflow-task-$* ==="
+	tkn bundle push $(QUAY_NS)/abevalflow-task-$*:$(VERSION) \
 	  -f $(TASKS_DIR)/$*.yaml
 	@echo ""
 
 list: ## List all bundles in the registry
 	@for task in $(TASKS); do \
-	  echo "--- task-$$task ---"; \
-	  tkn bundle list $(QUAY_REPO)/task-$$task 2>/dev/null || echo "  (not found)"; \
+	  echo "--- abevalflow-task-$$task ---"; \
+	  tkn bundle list $(QUAY_NS)/abevalflow-task-$$task 2>/dev/null || echo "  (not found)"; \
 	done
 
 digests: ## Print SHA digests for all pushed bundles
 	@for task in $(TASKS); do \
-	  DIGEST=$$(skopeo inspect --format '{{.Digest}}' docker://$(QUAY_REPO)/task-$$task:$(VERSION) 2>/dev/null || echo "NOT_FOUND"); \
-	  echo "$(QUAY_REPO)/task-$$task:$(VERSION)@$$DIGEST"; \
+	  DIGEST=$$(skopeo inspect --format '{{.Digest}}' docker://$(QUAY_NS)/abevalflow-task-$$task:$(VERSION) 2>/dev/null || echo "NOT_FOUND"); \
+	  echo "$(QUAY_NS)/abevalflow-task-$$task:$(VERSION)@$$DIGEST"; \
 	done
 
 clean: ## Remove local tkn bundle cache
