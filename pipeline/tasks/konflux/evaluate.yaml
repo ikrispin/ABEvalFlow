@@ -561,7 +561,7 @@ spec:
 
     # Step 8: MCPChecker - Run Evaluation
     - name: mcpchecker-eval
-      image: quay.io/rhecosystemappeng/mcpchecker-runner:latest
+      image: registry.access.redhat.com/ubi9/python-311:9.6
       env:
         - name: MCP_URL
           valueFrom:
@@ -594,6 +594,8 @@ spec:
         
         echo "=== EVALUATE PHASE: MCPChecker ==="
         
+        pip install --quiet --no-cache-dir mcpchecker 2>&1 | tail -3
+
         if [ -z "${MCP_URL:-}" ]; then
           echo "ERROR: MCP_URL not set"
           exit 1
