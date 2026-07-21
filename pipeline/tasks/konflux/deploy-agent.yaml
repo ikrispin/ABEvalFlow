@@ -7,9 +7,10 @@ metadata:
     app.kubernetes.io/component: konflux
 spec:
   description: >-
-    Deploys an A2A agent as a Deployment + Service in the current namespace
-    using the container image from the Konflux snapshot. Waits for the agent
-    to become ready and outputs its endpoint URL.
+    Deploys an A2A agent as a Deployment + Service on a remote workload
+    cluster using the container image from the Konflux snapshot. The agent
+    is deployed to the ab-eval-flow namespace on the workload cluster where
+    LiteLLM and other eval infrastructure already live.
   params:
     - name: agent-image
       type: string
@@ -30,9 +31,17 @@ spec:
       type: string
       default: "300"
       description: Seconds to wait for agent readiness
+    - name: workload-cluster-url
+      type: string
+      default: "https://api.cn-ai-lab.2vn8.p1.openshiftapps.com:6443"
+      description: API URL of the workload cluster where the agent is deployed
+    - name: workload-namespace
+      type: string
+      default: "ab-eval-flow"
+      description: Namespace on the workload cluster to deploy the agent
   results:
     - name: agent-endpoint
-      description: HTTP endpoint URL of the deployed agent
+      description: HTTP endpoint URL of the deployed agent (cluster-internal)
     - name: agent-name
       description: Name of the Deployment/Service (for cleanup)
     - name: deployed
@@ -40,26 +49,37 @@ spec:
   steps:
     - name: deploy
       image: registry.redhat.io/openshift4/ose-cli:latest
+      env:
+        - name: WORKLOAD_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: workload-cluster-credentials
+              key: token
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
-        echo "=== DEPLOY AGENT ==="
+        echo "=== DEPLOY AGENT (cross-cluster) ==="
+
+        CLUSTER_URL="$(params.workload-cluster-url)"
+        NAMESPACE="$(params.workload-namespace)"
+        OC_REMOTE="oc --server=$CLUSTER_URL --token=$WORKLOAD_TOKEN --insecure-skip-tls-verify=true"
 
         RUN_ID=$(echo "$(params.pipeline-run-id)" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | cut -c1-20)
         AGENT_NAME="a2a-eval-${RUN_ID:-$(date +%s)}"
-        NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
         AGENT_IMAGE="$(params.agent-image)"
 
-        echo "Agent name: $AGENT_NAME"
+        echo "Workload cluster: $CLUSTER_URL"
         echo "Namespace: $NAMESPACE"
+        echo "Agent name: $AGENT_NAME"
         echo "Image: $AGENT_IMAGE"
 
-        cat <<YAML | oc apply -f -
+        $OC_REMOTE whoami || { echo "ERROR: Cannot authenticate to workload cluster"; exit 1; }
+
+        cat <<YAML | $OC_REMOTE apply -n $NAMESPACE -f -
         apiVersion: apps/v1
         kind: Deployment
         metadata:
           name: $AGENT_NAME
-          namespace: $NAMESPACE
           labels:
             app: $AGENT_NAME
             abevalflow/temp: "true"
@@ -112,7 +132,6 @@ spec:
         kind: Service
         metadata:
           name: $AGENT_NAME
-          namespace: $NAMESPACE
           labels:
             abevalflow/temp: "true"
         spec:
@@ -121,21 +140,40 @@ spec:
           ports:
           - port: 8000
             targetPort: 8000
+        ---
+        apiVersion: route.openshift.io/v1
+        kind: Route
+        metadata:
+          name: $AGENT_NAME
+          labels:
+            abevalflow/temp: "true"
+        spec:
+          to:
+            kind: Service
+            name: $AGENT_NAME
+          port:
+            targetPort: 8000
+          tls:
+            termination: edge
+            insecureEdgeTerminationPolicy: Redirect
         YAML
 
         TIMEOUT=$(params.readiness-timeout)
-        ENDPOINT="http://${AGENT_NAME}.${NAMESPACE}.svc:8000"
 
         printf "Waiting for agent readiness"
         for i in $(seq 1 $((TIMEOUT / 5))); do
-          if oc rollout status deployment/$AGENT_NAME --timeout=5s >/dev/null 2>&1; then
-            if curl -sf "$ENDPOINT/.well-known/agent.json" > /dev/null 2>&1; then
-              echo " ready!"
-              echo -n "$ENDPOINT" > "$(results.agent-endpoint.path)"
-              echo -n "$AGENT_NAME" > "$(results.agent-name.path)"
-              echo -n "true" > "$(results.deployed.path)"
-              echo "Agent endpoint: $ENDPOINT"
-              exit 0
+          if $OC_REMOTE rollout status deployment/$AGENT_NAME -n $NAMESPACE --timeout=5s >/dev/null 2>&1; then
+            ROUTE_HOST=$($OC_REMOTE get route $AGENT_NAME -n $NAMESPACE -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
+            if [ -n "$ROUTE_HOST" ]; then
+              ENDPOINT="https://${ROUTE_HOST}"
+              if curl -skf "$ENDPOINT/.well-known/agent.json" > /dev/null 2>&1; then
+                echo " ready!"
+                echo -n "$ENDPOINT" > "$(results.agent-endpoint.path)"
+                echo -n "$AGENT_NAME" > "$(results.agent-name.path)"
+                echo -n "true" > "$(results.deployed.path)"
+                echo "Agent endpoint: $ENDPOINT"
+                exit 0
+              fi
             fi
           fi
           printf "."
@@ -144,7 +182,7 @@ spec:
 
         echo " TIMED OUT"
         echo "Cleaning up failed deployment..."
-        oc delete deployment/$AGENT_NAME service/$AGENT_NAME --ignore-not-found=true
+        $OC_REMOTE delete deployment/$AGENT_NAME service/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
         echo -n "" > "$(results.agent-endpoint.path)"
         echo -n "$AGENT_NAME" > "$(results.agent-name.path)"
         echo -n "false" > "$(results.deployed.path)"

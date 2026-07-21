@@ -7,8 +7,9 @@ metadata:
     app.kubernetes.io/component: konflux
 spec:
   description: >-
-    Cleans up the A2A agent Deployment and Service created by the deploy-agent
-    task. Runs in the pipeline's finally block to ensure cleanup even on failure.
+    Cleans up the A2A agent Deployment and Service on the remote workload
+    cluster. Runs in the pipeline's finally block to ensure cleanup even
+    on failure.
   params:
     - name: agent-name
       type: string
@@ -18,9 +19,24 @@ spec:
       type: string
       default: "false"
       description: Whether an agent was actually deployed
+    - name: workload-cluster-url
+      type: string
+      default: "https://api.cn-ai-lab.2vn8.p1.openshiftapps.com:6443"
+      description: API URL of the workload cluster
+    - name: workload-namespace
+      type: string
+      default: "ab-eval-flow"
+      description: Namespace on the workload cluster
   steps:
     - name: cleanup
       image: registry.redhat.io/openshift4/ose-cli:latest
+      env:
+        - name: WORKLOAD_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: workload-cluster-credentials
+              key: token
+              optional: true
       script: |
         #!/usr/bin/env bash
 
@@ -32,10 +48,19 @@ spec:
           exit 0
         fi
 
-        echo "=== CLEANUP AGENT ==="
-        echo "Deleting: $AGENT_NAME"
+        if [ -z "${WORKLOAD_TOKEN:-}" ]; then
+          echo "WARNING: No workload cluster token, cannot clean up"
+          exit 0
+        fi
 
-        oc delete deployment/$AGENT_NAME --ignore-not-found=true
-        oc delete service/$AGENT_NAME --ignore-not-found=true
+        echo "=== CLEANUP AGENT (cross-cluster) ==="
+        CLUSTER_URL="$(params.workload-cluster-url)"
+        NAMESPACE="$(params.workload-namespace)"
+        OC_REMOTE="oc --server=$CLUSTER_URL --token=$WORKLOAD_TOKEN --insecure-skip-tls-verify=true"
+
+        echo "Deleting: $AGENT_NAME in $NAMESPACE on $CLUSTER_URL"
+        $OC_REMOTE delete route/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
+        $OC_REMOTE delete deployment/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
+        $OC_REMOTE delete service/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
 
         echo "Cleanup complete"
