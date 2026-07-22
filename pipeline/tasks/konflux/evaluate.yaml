@@ -290,19 +290,32 @@ spec:
         echo "=== Retrieving results ==="
         $OC logs $POD_NAME -n $NAMESPACE 2>&1 | tee /tmp/eval-pod-logs.txt
 
-        SUMMARY=$(grep -A5 '"mean_reward"' /tmp/eval-pod-logs.txt | head -6 || echo "")
-        if [ -n "$SUMMARY" ]; then
-          echo "$SUMMARY" > /tmp/eval-summary-extracted.json
-          MEAN_REWARD=$(python3 -c "import json; print(json.loads(open('/tmp/eval-summary-extracted.json').read().strip())['mean_reward'])" 2>/dev/null || echo "0.0")
-          REC=$(python3 -c "import json; print(json.loads(open('/tmp/eval-summary-extracted.json').read().strip())['recommendation'])" 2>/dev/null || echo "fail")
-          echo -n "$MEAN_REWARD" > "$(results.treatment-mean-reward.path)"
-          echo -n "0.0" > "$(results.control-mean-reward.path)"
-          echo -n "$REC" > "$(results.recommendation.path)"
-          echo "Mean reward: $MEAN_REWARD"
-          echo "Recommendation: $REC"
-        else
-          echo "WARNING: Could not extract eval summary from pod logs"
-        fi
+        python3 - /tmp/eval-pod-logs.txt "$(results.treatment-mean-reward.path)" "$(results.control-mean-reward.path)" "$(results.recommendation.path)" <<'EXTRACT'
+        import json, re, sys
+
+        logs_path, treat_path, ctrl_path, rec_path = sys.argv[1:5]
+        logs = open(logs_path).read()
+
+        # Find the JSON summary block with mean_reward
+        pattern = r'\{[^{}]*"mean_reward"[^{}]*\}'
+        matches = re.findall(pattern, logs)
+
+        if matches:
+            summary = json.loads(matches[-1])
+            mean_reward = summary.get("mean_reward", 0.0)
+            rec = summary.get("recommendation", "fail")
+            print(f"Mean reward: {mean_reward}")
+            print(f"Recommendation: {rec}")
+            print(f"Trials: {summary.get('n_trials', 0)}")
+            open(treat_path, "w").write(str(mean_reward))
+            open(ctrl_path, "w").write("0.0")
+            open(rec_path, "w").write(rec)
+        else:
+            print("WARNING: Could not extract eval summary from pod logs")
+            open(treat_path, "w").write("0.0")
+            open(ctrl_path, "w").write("0.0")
+            open(rec_path, "w").write("fail")
+        EXTRACT
 
         $OC delete pod $POD_NAME -n $NAMESPACE --ignore-not-found=true
         echo "=== Evaluate phase complete ==="
