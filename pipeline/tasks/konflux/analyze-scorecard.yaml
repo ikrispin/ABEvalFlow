@@ -220,7 +220,7 @@ spec:
 
         echo "=== Analysis complete ==="
         echo "Report: $REPORT_DIR"
-        cat "$REPORT_DIR/report.md"
+        cat "$REPORT_DIR/report.md" 2>/dev/null || echo "(report.md not available)"
 
     - name: aggregate-scorecard
       image: registry.access.redhat.com/ubi9/python-311:9.6
