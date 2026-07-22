@@ -51,7 +51,7 @@ spec:
               value: task
         params:
           - name: agent-image
-            value: quay.io/ecosystem-appeng/google-lightspeed-agent:on-pr-4af1ac0fab1c823cf2d034961c902a90c54ba4f4
+            value: quay.io/ecosystem-appeng/google-lightspeed-agent:176a268e783a84f903ce680a26e031294ea985f7
           - name: llm-api-base
             value: "http://litellm.ab-eval-flow.svc:4000"
           - name: llm-model
