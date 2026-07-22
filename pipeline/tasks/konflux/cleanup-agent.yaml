@@ -59,8 +59,8 @@ spec:
         OC_REMOTE="oc --server=$CLUSTER_URL --token=$WORKLOAD_TOKEN --insecure-skip-tls-verify=true"
 
         echo "Deleting: $AGENT_NAME in $NAMESPACE on $CLUSTER_URL"
-        $OC_REMOTE delete route/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
         $OC_REMOTE delete deployment/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
         $OC_REMOTE delete service/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
+        $OC_REMOTE delete pod -n $NAMESPACE -l abevalflow/temp=true,abevalflow/type=eval-job --ignore-not-found=true
 
         echo "Cleanup complete"

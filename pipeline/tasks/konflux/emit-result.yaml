@@ -64,7 +64,7 @@ spec:
           NOTE="ABEvalFlow: recommendation=${REPORT_REC} (no scorecard)"
 
         else
-          RESULT="ERROR"
+          RESULT="FAILURE"
           NOTE="ABEvalFlow: no scorecard.json or report.json found"
         fi
 
