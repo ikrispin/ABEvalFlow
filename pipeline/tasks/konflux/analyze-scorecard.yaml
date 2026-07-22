@@ -144,75 +144,37 @@ spec:
         export PYTHONPATH="$PIPELINE_DIR"
         pip install --quiet --no-cache-dir pydantic scipy pyyaml
 
-        # --- 2. Run analysis based on eval engine ---
+        # --- 2. Use pre-computed report or run analysis ---
         REPORT_DIR="$(workspaces.source.path)/reports/$(params.submission-name)"
         RESULTS_DIR="$(workspaces.source.path)/eval-results/$(params.submission-name)"
         EVAL_ENGINE="$(params.eval-engine)"
+        mkdir -p "$REPORT_DIR"
 
-        if [ "$EVAL_ENGINE" = "ase" ]; then
-          echo "=== ASE mode: reading pre-generated report ==="
-          if [ ! -f "$REPORT_DIR/report.json" ]; then
-            echo "ERROR: ASE report.json not found at $REPORT_DIR/report.json"
-            exit 1
-          fi
-          echo "Found ASE report at $REPORT_DIR"
-
-        elif [ "$EVAL_ENGINE" = "harbor" ]; then
-          echo "=== Harbor mode: running analysis ==="
+        if [ -f "$REPORT_DIR/report.json" ]; then
+          echo "=== report.json already exists (computed by remote eval Pod) ==="
+          python3 -c "
+        import json, sys
+        r = json.load(open(sys.argv[1]))
+        s = r.get('summary', {})
+        t = s.get('treatment', {})
+        print(f\"Recommendation: {s.get('recommendation', 'N/A')}\")
+        print(f\"Mean reward: {t.get('mean_reward', 'N/A')}\")
+        print(f\"Trials: {t.get('n_trials', 0)}\")
+        print(f\"Pass rate: {t.get('pass_rate', 'N/A')}\")
+        " "$REPORT_DIR/report.json"
+        else
+          echo "=== No pre-computed report, running analyze.py locally ==="
           ARGS=(
             --results-dir "$RESULTS_DIR"
             --output-dir "$REPORT_DIR"
             --submission-name "$(params.submission-name)"
             --threshold "$(params.uplift-threshold)"
-            --eval-engine harbor
+            --eval-engine "$EVAL_ENGINE"
           )
-          if [ -n "$(params.commit-sha)" ]; then
-            ARGS+=(--commit-sha "$(params.commit-sha)")
-          fi
-          if [ -n "$(params.pipeline-run-id)" ]; then
-            ARGS+=(--pipeline-run-id "$(params.pipeline-run-id)")
-          fi
-          if [ -n "$(params.harbor-fork-revision)" ]; then
-            ARGS+=(--harbor-fork-revision "$(params.harbor-fork-revision)")
-          fi
+          [ -n "$(params.commit-sha)" ] && ARGS+=(--commit-sha "$(params.commit-sha)")
+          [ -n "$(params.pipeline-run-id)" ] && ARGS+=(--pipeline-run-id "$(params.pipeline-run-id)")
+          [ -n "$(params.harbor-fork-revision)" ] && ARGS+=(--harbor-fork-revision "$(params.harbor-fork-revision)")
           python scripts/analyze.py "${ARGS[@]}"
-
-        elif [ "$EVAL_ENGINE" = "a2a" ]; then
-          echo "=== A2A mode: running analysis ==="
-          ARGS=(
-            --results-dir "$RESULTS_DIR"
-            --output-dir "$REPORT_DIR"
-            --submission-name "$(params.submission-name)"
-            --threshold "$(params.uplift-threshold)"
-            --eval-engine a2a
-          )
-          if [ -n "$(params.commit-sha)" ]; then
-            ARGS+=(--commit-sha "$(params.commit-sha)")
-          fi
-          if [ -n "$(params.pipeline-run-id)" ]; then
-            ARGS+=(--pipeline-run-id "$(params.pipeline-run-id)")
-          fi
-          python scripts/analyze.py "${ARGS[@]}"
-
-        elif [ "$EVAL_ENGINE" = "both" ]; then
-          echo "=== Both mode: running Harbor analysis ==="
-          HARBOR_REPORT_DIR="${REPORT_DIR}/harbor"
-          ARGS=(
-            --results-dir "$RESULTS_DIR"
-            --output-dir "$HARBOR_REPORT_DIR"
-            --submission-name "$(params.submission-name)"
-            --threshold "$(params.uplift-threshold)"
-            --eval-engine harbor
-          )
-          if [ -n "$(params.commit-sha)" ]; then
-            ARGS+=(--commit-sha "$(params.commit-sha)")
-          fi
-          if [ -n "$(params.pipeline-run-id)" ]; then
-            ARGS+=(--pipeline-run-id "$(params.pipeline-run-id)")
-          fi
-          python scripts/analyze.py "${ARGS[@]}"
-
-          echo "=== Both mode: ASE report already at $REPORT_DIR ==="
         fi
 
         # --- 3. Enrich report with PR/LLM metadata (ASE mode) ---
