@@ -8,27 +8,22 @@ metadata:
 spec:
   description: >-
     Evaluation phase for Konflux integration. Submits the evaluation as a
-    remote Pod on the workload cluster (cn-ai-lab) where the agent, LiteLLM,
-    and Harbor infrastructure are co-located. Waits for completion and
-    retrieves results back to the Konflux workspace.
+    remote Pod on the workload cluster where the agent, LiteLLM, and Harbor
+    are co-located. Runs Harbor trials + analyze.py inside the Pod, then
+    retrieves report.json back to the Konflux workspace via logs.
   params:
     - name: eval-engine
       type: string
       default: "a2a"
-      description: Evaluation engine (harbor, ase, mcpchecker, a2a, both)
     - name: submission-dir
       type: string
-      description: Submission directory name under submissions/
     - name: submission-name
       type: string
-      description: Validated submission name
     - name: commit-sha
       type: string
       default: ""
-      description: Git commit SHA for provenance
     - name: pipeline-run-id
       type: string
-      description: PipelineRun name
     - name: pipeline-repo-url
       type: string
       default: "https://github.com/ikrispin/ABEvalFlow.git"
@@ -38,7 +33,6 @@ spec:
     - name: eval-base-image
       type: string
       default: "quay.io/rh-ee-ikrispin/abevalflow-eval-base:latest"
-      description: Eval base image with Harbor pre-installed
     - name: llm-model
       type: string
       default: "claude-sonnet"
@@ -51,10 +45,12 @@ spec:
     - name: agent-endpoint
       type: string
       default: ""
-      description: A2A agent endpoint URL (cluster-internal svc URL)
     - name: agent-timeout
       type: string
       default: "120"
+    - name: uplift-threshold
+      type: string
+      default: "0.0"
     - name: workload-cluster-url
       type: string
       default: "https://api.cn-ai-lab.2vn8.p1.openshiftapps.com:6443"
@@ -64,10 +60,8 @@ spec:
     - name: eval-timeout
       type: string
       default: "1800"
-      description: Seconds to wait for the eval Pod to complete
   workspaces:
     - name: source
-      description: Workspace containing the cloned submissions repository
   results:
     - name: treatment-mean-reward
       description: Treatment/with-skill mean reward
@@ -99,21 +93,23 @@ spec:
         SUBMISSION_NAME="$(params.submission-name)"
         SUBMISSION_DIR="$(params.submission-dir)"
         AGENT_ENDPOINT="$(params.agent-endpoint)"
-        RUN_ID=$(echo "$(params.pipeline-run-id)" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | cut -c1-20)
+        COMMIT_SHA="$(params.commit-sha)"
+        PIPELINE_RUN_ID="$(params.pipeline-run-id)"
+        UPLIFT_THRESHOLD="$(params.uplift-threshold)"
+        RUN_ID=$(echo "$PIPELINE_RUN_ID" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | cut -c1-20)
         POD_NAME="eval-job-${RUN_ID:-$(date +%s)}"
 
         echo "Engine: $EVAL_ENGINE"
         echo "Submission: $SUBMISSION_NAME"
         echo "Agent endpoint: $AGENT_ENDPOINT"
         echo "Eval pod: $POD_NAME"
-        echo "Workload cluster: $CLUSTER_URL"
 
-        # Write defaults for results
         echo -n "0.0" > "$(results.treatment-mean-reward.path)"
         echo -n "0.0" > "$(results.control-mean-reward.path)"
         echo -n "fail" > "$(results.recommendation.path)"
         RESULTS_DIR="$(workspaces.source.path)/eval-results/$SUBMISSION_NAME"
-        mkdir -p "$RESULTS_DIR"
+        REPORT_DIR="$(workspaces.source.path)/reports/$SUBMISSION_NAME"
+        mkdir -p "$RESULTS_DIR" "$REPORT_DIR"
         echo -n "$RESULTS_DIR" > "$(results.results-dir.path)"
 
         cat <<PODSPEC | $OC apply -n $NAMESPACE -f -
@@ -142,11 +138,11 @@ spec:
               echo "Engine: $EVAL_ENGINE"
               echo "Agent: $AGENT_ENDPOINT"
 
-              # Clone ABEvalFlow
               git clone --depth 1 --branch "$(params.pipeline-repo-revision)" \
                 "$(params.pipeline-repo-url)" /tmp/abevalflow
               cd /tmp/abevalflow
               export PYTHONPATH=/tmp/abevalflow
+              pip install --quiet --no-cache-dir pydantic scipy pyyaml 2>&1 | tail -1
 
               SUBMISSION_PATH="/tmp/abevalflow/submissions/$SUBMISSION_DIR"
               RESULTS_DIR="/tmp/eval-results"
@@ -154,7 +150,6 @@ spec:
               mkdir -p "\$RESULTS_DIR" "\$REPORT_DIR"
 
               if [ "$EVAL_ENGINE" = "a2a" ]; then
-                # Read trial count from metadata
                 N_ATTEMPTS=\$(python3 -c "
               import yaml
               try:
@@ -164,7 +159,6 @@ spec:
                   print(5)
               ")
 
-                # Find task directory
                 TASK_DIR=""
                 if [ -f "\$SUBMISSION_PATH/task.toml" ]; then
                   TASK_DIR="\$SUBMISSION_PATH"
@@ -184,7 +178,6 @@ spec:
 
                 echo "Task: \$(basename \$TASK_DIR) | Attempts: \$N_ATTEMPTS"
 
-                # Generate Harbor config
                 python3 - "\$RESULTS_DIR" "\$TASK_DIR" "\$N_ATTEMPTS" "$AGENT_ENDPOINT" "$(params.agent-timeout)" "$(params.llm-api-base)" "openai/$(params.llm-model)" <<'GENCFG'
               import sys, yaml
               results_dir, task_dir, n_attempts, endpoint, timeout, llm_api_base, llm_model = sys.argv[1:8]
@@ -202,34 +195,43 @@ spec:
               GENCFG
 
                 python3 -c "from abevalflow.harbor_agents.a2a_adapter import A2AAgent; print('A2AAgent imported OK')"
-
                 harbor run -c "\$RESULTS_DIR/config.yaml" -y 2>&1 || true
-
-                # Show exceptions if any
                 find "\$RESULTS_DIR" -name "exception.txt" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
+              fi
 
-                # Compute mean reward
-                python3 - "\$RESULTS_DIR" <<'COMPUTE'
-              import json, sys
-              from pathlib import Path
-              results_dir = Path(sys.argv[1])
-              rewards = []
-              for f in sorted(results_dir.rglob("result.json")):
-                  try:
-                      data = json.loads(f.read_text())
-                      vr = data.get("verifier_result") or {}
-                      rw = vr.get("rewards") or {}
-                      reward = rw.get("reward") or vr.get("reward")
-                      if reward is not None:
-                          rewards.append(float(reward))
-                  except:
-                      pass
-              mean_reward = sum(rewards) / len(rewards) if rewards else 0.0
-              rec = "pass" if mean_reward >= 0.5 else "fail"
-              result = {"mean_reward": mean_reward, "recommendation": rec, "n_trials": len(rewards)}
-              Path("/tmp/eval-summary.json").write_text(json.dumps(result))
-              print(json.dumps(result, indent=2))
-              COMPUTE
+              # === Run analyze.py inside the Pod (Option C) ===
+              echo "=== Running analyze.py ==="
+              ANALYZE_ARGS=(
+                --results-dir "\$RESULTS_DIR"
+                --output-dir "\$REPORT_DIR"
+                --submission-name "$SUBMISSION_NAME"
+                --threshold "$UPLIFT_THRESHOLD"
+                --eval-engine "$EVAL_ENGINE"
+              )
+              [ -n "$COMMIT_SHA" ] && ANALYZE_ARGS+=(--commit-sha "$COMMIT_SHA")
+              [ -n "$PIPELINE_RUN_ID" ] && ANALYZE_ARGS+=(--pipeline-run-id "$PIPELINE_RUN_ID")
+
+              python scripts/analyze.py "\${ANALYZE_ARGS[@]}" 2>&1 || echo "WARNING: analyze.py failed"
+
+              # Output summary for log extraction
+              if [ -f "\$REPORT_DIR/report.json" ]; then
+                echo "=== REPORT_JSON_START ==="
+                cat "\$REPORT_DIR/report.json"
+                echo ""
+                echo "=== REPORT_JSON_END ==="
+
+                python3 -c "
+              import json
+              r = json.load(open('\$REPORT_DIR/report.json'))
+              s = r.get('summary', {})
+              t = s.get('treatment', {}).get('mean_reward')
+              rec = s.get('recommendation', 'fail')
+              n = s.get('treatment', {}).get('n_trials', 0)
+              print(json.dumps({'mean_reward': t if t is not None else 0.0, 'recommendation': rec, 'n_trials': n}))
+              "
+              else
+                echo "WARNING: report.json not generated"
+                python3 -c "import json; print(json.dumps({'mean_reward': 0.0, 'recommendation': 'fail', 'n_trials': 0}))"
               fi
 
               echo "=== Remote Eval Pod Complete ==="
@@ -268,7 +270,7 @@ spec:
               ;;
             Failed)
               echo "Eval pod failed (${ELAPSED}s)"
-              $OC logs $POD_NAME -n $NAMESPACE 2>&1 | tail -30
+              $OC logs $POD_NAME -n $NAMESPACE 2>&1 | tail -50
               break
               ;;
             *)
@@ -290,31 +292,56 @@ spec:
         echo "=== Retrieving results ==="
         $OC logs $POD_NAME -n $NAMESPACE 2>&1 | tee /tmp/eval-pod-logs.txt
 
-        python3 - /tmp/eval-pod-logs.txt "$(results.treatment-mean-reward.path)" "$(results.control-mean-reward.path)" "$(results.recommendation.path)" <<'EXTRACT'
+        # Extract report.json from logs and write to workspace
+        python3 - /tmp/eval-pod-logs.txt "$(workspaces.source.path)/reports/$SUBMISSION_NAME" "$(results.treatment-mean-reward.path)" "$(results.control-mean-reward.path)" "$(results.recommendation.path)" <<'EXTRACT'
         import json, re, sys
 
-        logs_path, treat_path, ctrl_path, rec_path = sys.argv[1:5]
+        logs_path, report_dir, treat_path, ctrl_path, rec_path = sys.argv[1:6]
         logs = open(logs_path).read()
 
-        # Find the JSON summary block with mean_reward
-        pattern = r'\{[^{}]*"mean_reward"[^{}]*\}'
-        matches = re.findall(pattern, logs)
+        # Extract report.json from delimited block
+        report_match = re.search(r'=== REPORT_JSON_START ===\n(.*?)\n=== REPORT_JSON_END ===', logs, re.DOTALL)
+        if report_match:
+            report_json = report_match.group(1).strip()
+            try:
+                report = json.loads(report_json)
+                with open(f"{report_dir}/report.json", "w") as f:
+                    json.dump(report, f, indent=2)
+                print(f"Wrote report.json to {report_dir}/report.json")
 
-        if matches:
-            summary = json.loads(matches[-1])
-            mean_reward = summary.get("mean_reward", 0.0)
-            rec = summary.get("recommendation", "fail")
-            print(f"Mean reward: {mean_reward}")
-            print(f"Recommendation: {rec}")
-            print(f"Trials: {summary.get('n_trials', 0)}")
-            open(treat_path, "w").write(str(mean_reward))
-            open(ctrl_path, "w").write("0.0")
-            open(rec_path, "w").write(rec)
+                s = report.get("summary", {})
+                t_reward = s.get("treatment", {}).get("mean_reward")
+                recommendation = s.get("recommendation", "fail")
+                n_trials = s.get("treatment", {}).get("n_trials", 0)
+                print(f"Treatment mean reward: {t_reward}")
+                print(f"Recommendation: {recommendation}")
+                print(f"Trials: {n_trials}")
+
+                open(treat_path, "w").write(str(t_reward if t_reward is not None else 0.0))
+                open(ctrl_path, "w").write("0.0")
+                open(rec_path, "w").write(recommendation)
+            except json.JSONDecodeError as e:
+                print(f"ERROR: Failed to parse report.json: {e}")
+                open(treat_path, "w").write("0.0")
+                open(ctrl_path, "w").write("0.0")
+                open(rec_path, "w").write("fail")
         else:
-            print("WARNING: Could not extract eval summary from pod logs")
-            open(treat_path, "w").write("0.0")
-            open(ctrl_path, "w").write("0.0")
-            open(rec_path, "w").write("fail")
+            # Fallback: extract summary JSON
+            pattern = r'\{[^{}]*"mean_reward"[^{}]*\}'
+            matches = re.findall(pattern, logs)
+            if matches:
+                summary = json.loads(matches[-1])
+                mean_reward = summary.get("mean_reward", 0.0)
+                rec = summary.get("recommendation", "fail")
+                print(f"Fallback - Mean reward: {mean_reward}, Recommendation: {rec}")
+                open(treat_path, "w").write(str(mean_reward))
+                open(ctrl_path, "w").write("0.0")
+                open(rec_path, "w").write(rec)
+            else:
+                print("WARNING: Could not extract results from pod logs")
+                open(treat_path, "w").write("0.0")
+                open(ctrl_path, "w").write("0.0")
+                open(rec_path, "w").write("fail")
         EXTRACT
 
         $OC delete pod $POD_NAME -n $NAMESPACE --ignore-not-found=true
