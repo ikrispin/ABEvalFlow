@@ -56,11 +56,12 @@ spec:
         echo "=== CLEANUP AGENT (cross-cluster) ==="
         CLUSTER_URL="$(params.workload-cluster-url)"
         NAMESPACE="$(params.workload-namespace)"
-        OC_REMOTE="oc --server=$CLUSTER_URL --token=$WORKLOAD_TOKEN --insecure-skip-tls-verify=true"
+        # TODO: Replace --insecure-skip-tls-verify with --certificate-authority
+        oc login --server="$CLUSTER_URL" --token="$WORKLOAD_TOKEN" --insecure-skip-tls-verify=true 2>/dev/null
 
         echo "Deleting: $AGENT_NAME in $NAMESPACE on $CLUSTER_URL"
-        $OC_REMOTE delete deployment/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
-        $OC_REMOTE delete service/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
-        $OC_REMOTE delete pod -n $NAMESPACE -l abevalflow/temp=true,abevalflow/type=eval-job --ignore-not-found=true
+        oc delete deployment/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
+        oc delete service/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
+        oc delete pod -n $NAMESPACE -l abevalflow/temp=true,abevalflow/type=eval-job --ignore-not-found=true
 
         echo "Cleanup complete"

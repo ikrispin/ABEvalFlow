@@ -87,7 +87,8 @@ spec:
 
         CLUSTER_URL="$(params.workload-cluster-url)"
         NAMESPACE="$(params.workload-namespace)"
-        OC="oc --server=$CLUSTER_URL --token=$WORKLOAD_TOKEN --insecure-skip-tls-verify=true"
+        # TODO: Replace --insecure-skip-tls-verify with --certificate-authority
+        oc login --server="$CLUSTER_URL" --token="$WORKLOAD_TOKEN" --insecure-skip-tls-verify=true 2>/dev/null
 
         EVAL_ENGINE="$(params.eval-engine)"
         SUBMISSION_NAME="$(params.submission-name)"
@@ -112,7 +113,7 @@ spec:
         mkdir -p "$RESULTS_DIR" "$REPORT_DIR"
         echo -n "$RESULTS_DIR" > "$(results.results-dir.path)"
 
-        cat <<PODSPEC | $OC apply -n $NAMESPACE -f -
+        cat <<PODSPEC | oc apply -n $NAMESPACE -f -
         apiVersion: v1
         kind: Pod
         metadata:
@@ -132,7 +133,6 @@ spec:
             - |
               set -euo pipefail
               export HOME=/tmp
-              export PYTHONHTTPSVERIFY=0
 
               echo "=== Remote Eval Pod Starting ==="
               echo "Engine: $EVAL_ENGINE"
@@ -195,7 +195,9 @@ spec:
               GENCFG
 
                 python3 -c "from abevalflow.harbor_agents.a2a_adapter import A2AAgent; print('A2AAgent imported OK')"
-                harbor run -c "\$RESULTS_DIR/config.yaml" -y 2>&1 || true
+                HARBOR_EXIT=0
+                harbor run -c "\$RESULTS_DIR/config.yaml" -y 2>&1 || HARBOR_EXIT=\$?
+                echo "Harbor exit code: \$HARBOR_EXIT"
                 find "\$RESULTS_DIR" -name "exception.txt" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || true
               fi
 
@@ -213,7 +215,9 @@ spec:
 
               python scripts/analyze.py "\${ANALYZE_ARGS[@]}" 2>&1 || echo "WARNING: analyze.py failed"
 
-              # Output summary for log extraction
+              # TODO: Migrate to ConfigMap-based result transfer instead of
+              # log parsing. Write report.json to a ConfigMap, read it from
+              # the orchestrator task, and delete in cleanup.
               if [ -f "\$REPORT_DIR/report.json" ]; then
                 echo "=== REPORT_JSON_START ==="
                 cat "\$REPORT_DIR/report.json"
@@ -262,7 +266,7 @@ spec:
         ELAPSED=0
 
         while [ $ELAPSED -lt $TIMEOUT ]; do
-          PHASE=$($OC get pod $POD_NAME -n $NAMESPACE -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+          PHASE=$(oc get pod $POD_NAME -n $NAMESPACE -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
           case "$PHASE" in
             Succeeded)
               echo "Eval pod completed successfully (${ELAPSED}s)"
@@ -270,7 +274,7 @@ spec:
               ;;
             Failed)
               echo "Eval pod failed (${ELAPSED}s)"
-              $OC logs $POD_NAME -n $NAMESPACE 2>&1 | tail -50
+              oc logs $POD_NAME -n $NAMESPACE 2>&1 | tail -50
               break
               ;;
             *)
@@ -284,13 +288,13 @@ spec:
 
         if [ $ELAPSED -ge $TIMEOUT ]; then
           echo "TIMEOUT: Eval pod did not complete in ${TIMEOUT}s"
-          $OC logs $POD_NAME -n $NAMESPACE 2>&1 | tail -30
-          $OC delete pod $POD_NAME -n $NAMESPACE --ignore-not-found=true
+          oc logs $POD_NAME -n $NAMESPACE 2>&1 | tail -30
+          oc delete pod $POD_NAME -n $NAMESPACE --ignore-not-found=true
           exit 1
         fi
 
         echo "=== Retrieving results ==="
-        $OC logs $POD_NAME -n $NAMESPACE 2>&1 | tee /tmp/eval-pod-logs.txt
+        oc logs $POD_NAME -n $NAMESPACE 2>&1 | tee /tmp/eval-pod-logs.txt
 
         # Extract report.json from logs and write to workspace
         python3 - /tmp/eval-pod-logs.txt "$(workspaces.source.path)/reports/$SUBMISSION_NAME" "$(results.treatment-mean-reward.path)" "$(results.control-mean-reward.path)" "$(results.recommendation.path)" <<'EXTRACT'
@@ -344,5 +348,5 @@ spec:
                 open(rec_path, "w").write("fail")
         EXTRACT
 
-        $OC delete pod $POD_NAME -n $NAMESPACE --ignore-not-found=true
+        oc delete pod $POD_NAME -n $NAMESPACE --ignore-not-found=true
         echo "=== Evaluate phase complete ==="
