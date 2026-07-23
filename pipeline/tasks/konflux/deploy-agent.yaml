@@ -14,7 +14,13 @@ spec:
   params:
     - name: agent-image
       type: string
-      description: Full container image reference (with digest) for the agent
+      description: Agent image from the Konflux snapshot
+    - name: agent-image-override
+      type: string
+      default: ""
+      description: >-
+        Override image (used when the snapshot image is in a private registry).
+        When set, this takes precedence over agent-image.
     - name: llm-api-base
       type: string
       default: "http://litellm.ab-eval-flow.svc:4000"
@@ -62,20 +68,29 @@ spec:
 
         CLUSTER_URL="$(params.workload-cluster-url)"
         NAMESPACE="$(params.workload-namespace)"
-        OC_REMOTE="oc --server=$CLUSTER_URL --token=$WORKLOAD_TOKEN --insecure-skip-tls-verify=true"
+        # TODO: Replace --insecure-skip-tls-verify with --certificate-authority
+        # once the workload cluster CA cert is available as a mounted Secret.
+        oc login --server="$CLUSTER_URL" --token="$WORKLOAD_TOKEN" --insecure-skip-tls-verify=true 2>/dev/null
 
         RUN_ID=$(echo "$(params.pipeline-run-id)" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | cut -c1-20)
         AGENT_NAME="a2a-eval-${RUN_ID:-$(date +%s)}"
-        AGENT_IMAGE="$(params.agent-image)"
+        OVERRIDE="$(params.agent-image-override)"
+        if [ -n "$OVERRIDE" ]; then
+          AGENT_IMAGE="$OVERRIDE"
+          echo "Using override image (snapshot image not used)"
+        else
+          AGENT_IMAGE="$(params.agent-image)"
+          echo "Using snapshot image"
+        fi
 
         echo "Workload cluster: $CLUSTER_URL"
         echo "Namespace: $NAMESPACE"
         echo "Agent name: $AGENT_NAME"
         echo "Image: $AGENT_IMAGE"
 
-        $OC_REMOTE whoami || { echo "ERROR: Cannot authenticate to workload cluster"; exit 1; }
+        oc whoami || { echo "ERROR: Cannot authenticate to workload cluster"; exit 1; }
 
-        cat <<YAML | $OC_REMOTE apply -n $NAMESPACE -f -
+        cat <<YAML | oc apply -n $NAMESPACE -f -
         apiVersion: apps/v1
         kind: Deployment
         metadata:
@@ -99,6 +114,9 @@ spec:
                 ports:
                 - containerPort: 6379
                 resources:
+                  requests:
+                    cpu: 50m
+                    memory: 64Mi
                   limits:
                     cpu: 100m
                     memory: 128Mi
@@ -124,6 +142,9 @@ spec:
                 - name: LOG_LEVEL
                   value: "INFO"
                 resources:
+                  requests:
+                    cpu: 200m
+                    memory: 256Mi
                   limits:
                     cpu: 500m
                     memory: 512Mi
@@ -148,8 +169,8 @@ spec:
 
         printf "Waiting for agent readiness"
         for i in $(seq 1 $((TIMEOUT / 5))); do
-          if $OC_REMOTE rollout status deployment/$AGENT_NAME -n $NAMESPACE --timeout=5s >/dev/null 2>&1; then
-            READY=$($OC_REMOTE get deployment $AGENT_NAME -n $NAMESPACE -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+          if oc rollout status deployment/$AGENT_NAME -n $NAMESPACE --timeout=5s >/dev/null 2>&1; then
+            READY=$(oc get deployment $AGENT_NAME -n $NAMESPACE -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
             if [ "${READY:-0}" -ge 1 ]; then
               echo " ready!"
               echo -n "$ENDPOINT" > "$(results.agent-endpoint.path)"
@@ -165,7 +186,7 @@ spec:
 
         echo " TIMED OUT"
         echo "Cleaning up failed deployment..."
-        $OC_REMOTE delete deployment/$AGENT_NAME service/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
+        oc delete deployment/$AGENT_NAME service/$AGENT_NAME -n $NAMESPACE --ignore-not-found=true
         echo -n "" > "$(results.agent-endpoint.path)"
         echo -n "$AGENT_NAME" > "$(results.agent-name.path)"
         echo -n "false" > "$(results.deployed.path)"
