@@ -155,6 +155,14 @@ spec:
           fi
           echo "Found ASE report at $REPORT_DIR"
 
+        elif [ "$EVAL_ENGINE" = "aeh" ]; then
+          echo "=== AEH mode: reading pre-generated report ==="
+          if [ ! -f "$REPORT_DIR/report.json" ]; then
+            echo "ERROR: AEH report.json not found at $REPORT_DIR/report.json"
+            exit 1
+          fi
+          echo "Found AEH report at $REPORT_DIR"
+
         elif [ "$EVAL_ENGINE" = "harbor" ]; then
           echo "=== Harbor mode: running analysis ==="
           ARGS=(
@@ -240,6 +248,13 @@ spec:
         if [ "$EVAL_ENGINE" != "harbor" ] && [ "$EVAL_ENGINE" != "a2a" ]; then
           echo "Regenerating report.md from enriched JSON..."
           python3 -c "import sys;sys.path.insert(0,'$PIPELINE_DIR');from pathlib import Path;from abevalflow.report import AnalysisResult;from scripts.analyze import render_markdown;d=Path(sys.argv[1]);r=AnalysisResult.model_validate_json((d/'report.json').read_text());(d/'report.md').write_text(render_markdown(r))" "$REPORT_DIR"
+        fi
+
+        # --- 5b. Merge edge case results into report.json (if present) ---
+        EDGE_RESULTS="$REPORT_DIR/edge-case-results.json"
+        if [ -f "$EDGE_RESULTS" ]; then
+          echo "Merging edge case results into report.json..."
+          python3 -c "import json,sys;d=sys.argv[1];e=sys.argv[2];r=json.loads(open(d+'/report.json').read());ec=json.loads(open(e).read());r['edge_case_results']=ec;open(d+'/report.json','w').write(json.dumps(r,indent=2));print(f'Merged {len(ec)} edge case results')" "$REPORT_DIR" "$EDGE_RESULTS"
         fi
 
         # --- 6. Extract results for Tekton ---
