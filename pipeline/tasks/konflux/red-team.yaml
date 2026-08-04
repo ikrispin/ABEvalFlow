@@ -7,11 +7,12 @@ metadata:
     app.kubernetes.io/component: konflux
 spec:
   description: >-
-    Generic red team evaluation using Promptfoo. Generates domain-aware adversarial
-    attacks based on submission metadata and scores responses with LLM-as-judge.
-    Supports A2A agents (JSON-RPC), MCP servers, and generic HTTP endpoints.
-    Two modes: "smoke" generates a quick suite (~25 tests, basic strategy);
-    "full" produces comprehensive attacks with all strategies (~1750 tests).
+    Generic red team evaluation using Promptfoo (broad coverage) plus PyRIT
+    Crescendo (adaptive multi-turn) in full mode. Generates domain-aware
+    adversarial attacks from submission metadata and scores responses with
+    LLM-as-judge. Supports A2A agents (JSON-RPC) and generic HTTP endpoints.
+    Two modes: "smoke" (~25 Promptfoo tests, basic strategy, no Crescendo);
+    "full" (comprehensive Promptfoo + PyRIT Crescendo after Promptfoo).
   params:
     - name: eval-engine
       type: string
@@ -30,8 +31,8 @@ spec:
       type: string
       default: "full"
       description: >-
-        "smoke" generates a quick suite from metadata (~25 tests, basic strategy, ~2 min).
-        "full" generates comprehensive attacks with all strategies (~1750 tests, ~90 min).
+        "smoke" generates a quick Promptfoo suite (~25 tests, basic strategy, ~2 min).
+        "full" runs comprehensive Promptfoo then PyRIT Crescendo (~90+ min).
     - name: llm-api-base
       type: string
       default: ""
@@ -56,6 +57,10 @@ spec:
       type: string
       default: "12"
       description: Number of parallel Promptfoo test evaluations
+    - name: crescendo-max-turns
+      type: string
+      default: "7"
+      description: Max turns per PyRIT Crescendo objective (full mode only)
   workspaces:
     - name: source
       description: Shared workspace with cloned submission and pipeline repos
@@ -183,7 +188,7 @@ spec:
         CONCURRENCY="$(params.concurrency)"
 
         if [ "$MODE" = "full" ]; then
-          echo "Mode: full (comprehensive attacks, all strategies)"
+          echo "Mode: full (comprehensive attacks; Crescendo via PyRIT step)"
         else
           echo "Mode: smoke (quick coverage, basic strategy)"
         fi
@@ -222,8 +227,83 @@ spec:
           PASSED="false"
         fi
 
+        # Stash Promptfoo findings for the Crescendo merge step
+        echo -n "$FINDINGS" > "$REPORT_DIR/.promptfoo-findings"
         echo -n "$PASSED" > "$(results.redteam-passed.path)"
         echo -n "$FINDINGS" > "$(results.redteam-findings.path)"
 
         echo ""
-        echo "Red team complete: $FINDINGS findings, passed=$PASSED"
+        echo "Promptfoo complete: $FINDINGS findings, passed=$PASSED"
+
+    - name: run-crescendo
+      image: quay.io/rh-ee-ikrispin/abevalflow-pyrit:0.1
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        echo "=== RED TEAM: PyRIT Crescendo ==="
+
+        EVAL_ENGINE="$(params.eval-engine)"
+        if [ "$EVAL_ENGINE" = "ase" ]; then
+          echo "Skipped (ase)"
+          exit 0
+        fi
+
+        ENDPOINT="$(params.agent-endpoint)"
+        if [ -z "$ENDPOINT" ]; then
+          echo "Skipped (no endpoint)"
+          exit 0
+        fi
+
+        MODE="$(params.red-team-mode)"
+        if [ "$MODE" != "full" ]; then
+          echo "Skipped (Crescendo runs only in full mode; mode=$MODE)"
+          exit 0
+        fi
+
+        REPORT_DIR="$(workspaces.source.path)/reports/$(params.submission-name)"
+        SUBMISSION_PATH="$(workspaces.source.path)/submissions/$(params.submission-dir)"
+        # Prefer workspace pipeline clone (has scripts); fall back to image-baked copy
+        PIPELINE_DIR="$(workspaces.source.path)/_pipeline"
+        if [ -d "$PIPELINE_DIR/scripts/pyrit_crescendo" ]; then
+          CRESCENDO_DIR="$PIPELINE_DIR/scripts/pyrit_crescendo"
+        else
+          CRESCENDO_DIR="/app/pyrit_crescendo"
+        fi
+        mkdir -p "$REPORT_DIR"
+
+        echo "Running Crescendo from $CRESCENDO_DIR"
+        set +e
+        python "$CRESCENDO_DIR/run_crescendo.py" \
+          --endpoint "$ENDPOINT" \
+          --eval-engine "$EVAL_ENGINE" \
+          --submission-path "$SUBMISSION_PATH" \
+          --llm-api-base "$(params.llm-api-base)" \
+          --llm-model "$(params.llm-model)" \
+          --llm-api-key "$(params.llm-api-key)" \
+          --max-turns "$(params.crescendo-max-turns)" \
+          --output "$REPORT_DIR/pyrit-crescendo-results.json"
+        CRESCENDO_EXIT=$?
+        set -e
+
+        PF_FINDINGS=0
+        if [ -f "$REPORT_DIR/.promptfoo-findings" ]; then
+          PF_FINDINGS=$(cat "$REPORT_DIR/.promptfoo-findings")
+        fi
+
+        CRESCENDO_FINDINGS=0
+        if [ -f "$REPORT_DIR/pyrit-crescendo-results.json" ]; then
+          CRESCENDO_FINDINGS=$(python -c "import json;d=json.load(open('$REPORT_DIR/pyrit-crescendo-results.json'));print(int(d.get('summary',{}).get('achieved',0)))" 2>/dev/null || echo "0")
+        fi
+
+        TOTAL=$((PF_FINDINGS + CRESCENDO_FINDINGS))
+        PASSED="true"
+        if [ "$TOTAL" -gt "0" ]; then
+          PASSED="false"
+        fi
+
+        echo -n "$PASSED" > "$(results.redteam-passed.path)"
+        echo -n "$TOTAL" > "$(results.redteam-findings.path)"
+
+        echo ""
+        echo "Crescendo exit=$CRESCENDO_EXIT findings=$CRESCENDO_FINDINGS"
+        echo "Combined red-team: promptfoo=$PF_FINDINGS crescendo=$CRESCENDO_FINDINGS total=$TOTAL passed=$PASSED"

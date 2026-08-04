@@ -344,38 +344,82 @@ def aggregate_scorecard(
             gate_result.score,
         )
 
-    # Red team gate: consume redteam-results.json if present
+    # Red team gate: Promptfoo + optional PyRIT Crescendo (combined)
     redteam_results_path = reports_dir / "redteam-results.json"
-    if redteam_results_path.exists():
-        logger.info("Processing red team gate from %s", redteam_results_path)
+    pyrit_results_path = reports_dir / "pyrit-crescendo-results.json"
+    if redteam_results_path.exists() or pyrit_results_path.exists():
+        logger.info(
+            "Processing red team gate (promptfoo=%s, pyrit=%s)",
+            redteam_results_path.exists(),
+            pyrit_results_path.exists(),
+        )
         try:
-            redteam_data = json.loads(redteam_results_path.read_text())
-            results_list = redteam_data.get("results", {}).get("results", [])
-            total = len(results_list)
-            # Exclude infrastructure errors (fetch failures) from findings count
-            findings = [
-                r for r in results_list
-                if r.get("gradingResult") and not r["gradingResult"].get("pass", True)
-                and "fetch failed" not in (r["gradingResult"].get("reason") or "")
-            ]
-            num_findings = len(findings)
+            pf_findings: list[str] = []
+            pf_total = 0
+            pf_num = 0
+            if redteam_results_path.exists():
+                redteam_data = json.loads(redteam_results_path.read_text())
+                results_list = redteam_data.get("results", {}).get("results", [])
+                pf_total = len(results_list)
+                # Exclude infrastructure errors (fetch failures) from findings count
+                failed = [
+                    r for r in results_list
+                    if r.get("gradingResult") and not r["gradingResult"].get("pass", True)
+                    and "fetch failed" not in (r["gradingResult"].get("reason") or "")
+                ]
+                pf_num = len(failed)
+                pf_findings = [
+                    f"[promptfoo:{f.get('test', {}).get('metadata', {}).get('pluginId', 'unknown')}] "
+                    f"{(f.get('gradingResult', {}).get('reason') or '')[:100]}"
+                    for f in failed[:15]
+                ]
+
+            crescendo_findings: list[str] = []
+            crescendo_total = 0
+            crescendo_num = 0
+            if pyrit_results_path.exists():
+                pyrit_data = json.loads(pyrit_results_path.read_text())
+                if not pyrit_data.get("skipped"):
+                    cres_results = pyrit_data.get("crescendo_results") or []
+                    crescendo_total = len(cres_results)
+                    achieved = [r for r in cres_results if r.get("objective_achieved")]
+                    crescendo_num = len(achieved)
+                    crescendo_findings = [
+                        f"[crescendo] {(r.get('objective') or '')[:80]} — "
+                        f"{(r.get('judge_reason') or '')[:80]}"
+                        for r in achieved[:10]
+                    ]
+
+            num_findings = pf_num + crescendo_num
+            total = pf_total + crescendo_total
             passed = num_findings == 0
-            score = 1.0 - (num_findings / max(total, 1))
+            score = 1.0 - (num_findings / max(total, 1)) if total else 1.0
+            details_parts = []
+            if redteam_results_path.exists():
+                details_parts.append(f"promptfoo={pf_num}/{pf_total}")
+            if pyrit_results_path.exists() and crescendo_total:
+                details_parts.append(f"crescendo={crescendo_num}/{crescendo_total}")
+            details = (
+                f"{num_findings} vulnerabilities in {total} adversarial tests "
+                f"({', '.join(details_parts) or 'no tests'})"
+            )
 
             redteam_gate = GateResult(
                 name="red_team",
                 gate_type=GateType.SECURITY,
                 passed=passed,
                 score=round(score, 4),
-                details=f"{num_findings} vulnerabilities found in {total} adversarial tests",
-                findings=[
-                    f"[{f.get('test', {}).get('metadata', {}).get('pluginId', 'unknown')}] "
-                    f"{(f.get('gradingResult', {}).get('reason') or '')[:100]}"
-                    for f in findings[:20]
-                ],
+                details=details,
+                findings=(pf_findings + crescendo_findings)[:20],
             )
             gates.append(redteam_gate)
-            logger.info("Red team: passed=%s, score=%.3f, findings=%d/%d", passed, score, num_findings, total)
+            logger.info(
+                "Red team: passed=%s, score=%.3f, findings=%d/%d",
+                passed,
+                score,
+                num_findings,
+                total,
+            )
         except Exception as e:
             logger.warning("Failed to process red team results: %s", e)
 
